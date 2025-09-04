@@ -7,6 +7,8 @@
 (define-constant ERR_ALREADY_VOTED (err u105))
 (define-constant ERR_INSUFFICIENT_VOTING_POWER (err u106))
 (define-constant ERR_PROPOSAL_NOT_EXECUTABLE (err u107))
+(define-constant ERR_CANNOT_DELEGATE_TO_SELF (err u108))
+(define-constant ERR_CIRCULAR_DELEGATION (err u109))
 
 (define-constant DECAY_PERIOD u144)
 (define-constant MIN_PROPOSAL_THRESHOLD u1000)
@@ -56,6 +58,14 @@
     vote: bool,
     voting-power-used: uint,
     voted-at: uint
+  }
+)
+
+(define-map delegations
+  { delegator: principal }
+  { 
+    delegate: principal,
+    delegated-at: uint
   }
 )
 
@@ -114,8 +124,8 @@
       }
     )
 
-    (unwrap! (update-member-activity tx-sender) (err u200))
-    (unwrap! (update-member-proposals tx-sender) (err u201))
+    (try! (update-member-activity tx-sender))
+    (try! (update-member-proposals tx-sender))
     (var-set next-proposal-id (+ proposal-id u1))
     (ok proposal-id)
   )
@@ -153,8 +163,8 @@
       )
     )
     
-    (unwrap! (update-member-activity tx-sender) (err u202))
-    (unwrap! (update-member-votes tx-sender) (err u203))
+    (try! (update-member-activity tx-sender))
+    (try! (update-member-votes tx-sender))
     (ok true)
   )
 )
@@ -185,7 +195,42 @@
     (
       (member-data (unwrap! (get-member-by-address tx-sender) ERR_NOT_MEMBER))
     )
-    (unwrap! (update-member-activity tx-sender) (err u204))
+    (try! (update-member-activity tx-sender))
+    (ok true)
+  )
+)
+
+(define-public (delegate-voting-power (delegate principal))
+  (let
+    (
+      (delegator-data (unwrap! (get-member-by-address tx-sender) ERR_NOT_MEMBER))
+      (delegate-data (unwrap! (get-member-by-address delegate) ERR_NOT_MEMBER))
+      (current-height stacks-block-height)
+    )
+    (asserts! (not (is-eq tx-sender delegate)) ERR_CANNOT_DELEGATE_TO_SELF)
+    (asserts! (not (has-circular-delegation tx-sender delegate)) ERR_CIRCULAR_DELEGATION)
+    
+    (map-set delegations
+      { delegator: tx-sender }
+      {
+        delegate: delegate,
+        delegated-at: current-height
+      }
+    )
+    
+    (try! (update-member-activity tx-sender))
+    (ok true)
+  )
+)
+
+(define-public (revoke-delegation)
+  (let
+    (
+      (member-data (unwrap! (get-member-by-address tx-sender) ERR_NOT_MEMBER))
+      (delegation (unwrap! (map-get? delegations { delegator: tx-sender }) ERR_UNAUTHORIZED))
+    )
+    (map-delete delegations { delegator: tx-sender })
+    (try! (update-member-activity tx-sender))
     (ok true)
   )
 )
@@ -261,6 +306,32 @@
         (decay-periods (/ blocks-since-activity DECAY_PERIOD))
         (base-power (get voting-power member-data))
         (activity-bonus (+ (* (get total-proposals member-data) u100) (* (get total-votes member-data) u50)))
+        (own-power (if (> decay-periods u10) u0 (+ (- base-power (* decay-periods u100)) activity-bonus)))
+        (delegated-power (get-delegated-voting-power member-address))
+      )
+      (+ own-power delegated-power)
+    )
+    u0
+  )
+)
+
+(define-read-only (get-delegated-voting-power (delegate principal))
+  u0
+)
+
+(define-private (get-delegation-power-for-delegate (member-id uint))
+  u0
+)
+
+(define-private (get-own-voting-power (member-address principal))
+  (match (get-member-by-address member-address)
+    member-data
+    (let
+      (
+        (blocks-since-activity (- stacks-block-height (get last-activity member-data)))
+        (decay-periods (/ blocks-since-activity DECAY_PERIOD))
+        (base-power (get voting-power member-data))
+        (activity-bonus (+ (* (get total-proposals member-data) u100) (* (get total-votes member-data) u50)))
       )
       (if (> decay-periods u10)
         u0
@@ -284,6 +355,19 @@
   (match (get-member-by-id member-id)
     member-data (get-current-voting-power (get address member-data))
     u0
+  )
+)
+
+(define-private (has-circular-delegation (delegator principal) (target principal))
+  (let
+    (
+      (delegation (map-get? delegations { delegator: target }))
+    )
+    (match delegation
+      delegate-info 
+      (is-eq (get delegate delegate-info) delegator)
+      false
+    )
   )
 )
 
@@ -316,13 +400,43 @@
     member-data
     (some {
       current-voting-power: (get-current-voting-power member-address),
+      own-voting-power: (get-own-voting-power member-address),
+      delegated-voting-power: (get-delegated-voting-power member-address),
       base-voting-power: (get voting-power member-data),
       last-activity: (get last-activity member-data),
       joined-at: (get joined-at member-data),
       total-proposals: (get total-proposals member-data),
       total-votes: (get total-votes member-data),
-      blocks-inactive: (- stacks-block-height (get last-activity member-data))
+      blocks-inactive: (- stacks-block-height (get last-activity member-data)),
+      delegation: (map-get? delegations { delegator: member-address })
     })
     none
+  )
+)
+
+(define-read-only (get-delegation (delegator principal))
+  (map-get? delegations { delegator: delegator })
+)
+
+(define-read-only (get-delegators (delegate principal))
+  (let
+    (
+      (current-member-id (var-get next-member-id))
+    )
+    (filter is-delegator-of-delegate (map get-member-address-by-id (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10)))
+  )
+)
+
+(define-private (get-member-address-by-id (member-id uint))
+  (match (get-member-by-id member-id)
+    member-data (get address member-data)
+    'SP000000000000000000002Q6VF78
+  )
+)
+
+(define-private (is-delegator-of-delegate (member-address principal))
+  (match (map-get? delegations { delegator: member-address })
+    delegation true
+    false
   )
 )
