@@ -9,11 +9,15 @@
 (define-constant ERR_PROPOSAL_NOT_EXECUTABLE (err u107))
 (define-constant ERR_CANNOT_DELEGATE_TO_SELF (err u108))
 (define-constant ERR_CIRCULAR_DELEGATION (err u109))
+(define-constant ERR_INSUFFICIENT_STAKE (err u110))
+(define-constant ERR_STAKE_ALREADY_REFUNDED (err u111))
+(define-constant ERR_PROPOSAL_NOT_FINALIZED (err u112))
 
 (define-constant DECAY_PERIOD u144)
 (define-constant MIN_PROPOSAL_THRESHOLD u1000)
 (define-constant VOTING_DURATION u1008)
 (define-constant BASE_VOTING_POWER u1000)
+(define-constant PROPOSAL_STAKE_AMOUNT u500)
 
 (define-data-var next-member-id uint u1)
 (define-data-var next-proposal-id uint u1)
@@ -69,6 +73,16 @@
   }
 )
 
+(define-map proposal-stakes
+  { proposal-id: uint }
+  {
+    staker: principal,
+    stake-amount: uint,
+    refunded: bool,
+    refund-reason: (string-ascii 50)
+  }
+)
+
 (define-public (join-dao)
   (let
     (
@@ -106,8 +120,9 @@
       (current-voting-power (get-current-voting-power tx-sender))
       (proposal-id (var-get next-proposal-id))
       (current-height stacks-block-height)
+      (stake-required (+ MIN_PROPOSAL_THRESHOLD PROPOSAL_STAKE_AMOUNT))
     )
-    (asserts! (>= current-voting-power MIN_PROPOSAL_THRESHOLD) ERR_INSUFFICIENT_VOTING_POWER)
+    (asserts! (>= current-voting-power stake-required) ERR_INSUFFICIENT_STAKE)
     
     (map-set proposals
       { proposal-id: proposal-id }
@@ -121,6 +136,16 @@
         voting-ends-at: (+ current-height VOTING_DURATION),
         executed: false,
         min-votes-required: (/ (get-total-active-voting-power) u2)
+      }
+    )
+
+    (map-set proposal-stakes
+      { proposal-id: proposal-id }
+      {
+        staker: tx-sender,
+        stake-amount: PROPOSAL_STAKE_AMOUNT,
+        refunded: false,
+        refund-reason: ""
       }
     )
 
@@ -438,5 +463,74 @@
   (match (map-get? delegations { delegator: member-address })
     delegation true
     false
+  )
+)
+
+(define-public (claim-proposal-stake (proposal-id uint))
+  (let
+    (
+      (proposal (unwrap! (map-get? proposals { proposal-id: proposal-id }) ERR_PROPOSAL_NOT_FOUND))
+      (stake (unwrap! (map-get? proposal-stakes { proposal-id: proposal-id }) ERR_PROPOSAL_NOT_FOUND))
+      (current-height stacks-block-height)
+    )
+    (asserts! (is-eq (get staker stake) tx-sender) ERR_UNAUTHORIZED)
+    (asserts! (not (get refunded stake)) ERR_STAKE_ALREADY_REFUNDED)
+    (asserts! (> current-height (get voting-ends-at proposal)) ERR_PROPOSAL_NOT_FINALIZED)
+    
+    (let
+      (
+        (total-votes (+ (get votes-for proposal) (get votes-against proposal)))
+        (proposal-passed (and 
+          (>= total-votes (get min-votes-required proposal))
+          (> (get votes-for proposal) (get votes-against proposal))
+        ))
+      )
+      (if proposal-passed
+        (begin
+          (map-set proposal-stakes
+            { proposal-id: proposal-id }
+            (merge stake { 
+              refunded: true, 
+              refund-reason: "proposal-passed"
+            })
+          )
+          (ok PROPOSAL_STAKE_AMOUNT)
+        )
+        (begin
+          (map-set proposal-stakes
+            { proposal-id: proposal-id }
+            (merge stake { 
+              refunded: true, 
+              refund-reason: "proposal-failed"
+            })
+          )
+          (ok u0)
+        )
+      )
+    )
+  )
+)
+
+(define-read-only (get-proposal-stake (proposal-id uint))
+  (map-get? proposal-stakes { proposal-id: proposal-id })
+)
+
+(define-read-only (get-stake-status (proposal-id uint))
+  (match (map-get? proposal-stakes { proposal-id: proposal-id })
+    stake
+    (some {
+      staker: (get staker stake),
+      stake-amount: (get stake-amount stake),
+      refunded: (get refunded stake),
+      refund-reason: (get refund-reason stake),
+      can-claim: (and 
+        (not (get refunded stake))
+        (match (map-get? proposals { proposal-id: proposal-id })
+          proposal (> stacks-block-height (get voting-ends-at proposal))
+          false
+        )
+      )
+    })
+    none
   )
 )
