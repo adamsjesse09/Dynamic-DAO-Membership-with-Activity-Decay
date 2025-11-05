@@ -1,4 +1,3 @@
-(define-constant CONTRACT_OWNER tx-sender)
 (define-constant ERR_UNAUTHORIZED (err u100))
 (define-constant ERR_NOT_MEMBER (err u101))
 (define-constant ERR_ALREADY_MEMBER (err u102))
@@ -21,6 +20,7 @@
 
 (define-data-var next-member-id uint u1)
 (define-data-var next-proposal-id uint u1)
+(define-data-var next-snapshot-id uint u1)
 
 (define-map members
   { member-id: uint }
@@ -80,6 +80,16 @@
     stake-amount: uint,
     refunded: bool,
     refund-reason: (string-ascii 50)
+  }
+)
+
+(define-map snapshots
+  { snapshot-id: uint }
+  {
+    created-at: uint,
+    total-active-voting-power: uint,
+    members-count: uint,
+    proposals-total: uint
   }
 )
 
@@ -212,6 +222,29 @@
     )
     
     (ok true)
+  )
+)
+
+(define-public (create-snapshot)
+  (let
+    (
+      (snapshot-id (var-get next-snapshot-id))
+      (created-at stacks-block-height)
+      (total-power (get-total-active-voting-power))
+      (members-count (- (var-get next-member-id) u1))
+      (proposals-total (- (var-get next-proposal-id) u1))
+    )
+    (map-set snapshots
+      { snapshot-id: snapshot-id }
+      {
+        created-at: created-at,
+        total-active-voting-power: total-power,
+        members-count: members-count,
+        proposals-total: proposals-total
+      }
+    )
+    (var-set next-snapshot-id (+ snapshot-id u1))
+    (ok snapshot-id)
   )
 )
 
@@ -532,5 +565,21 @@
       )
     })
     none
+  )
+)
+
+(define-read-only (get-snapshot (snapshot-id uint))
+  (map-get? snapshots { snapshot-id: snapshot-id })
+)
+
+(define-read-only (get-latest-snapshot)
+  (let
+    (
+      (current-id (var-get next-snapshot-id))
+    )
+    (if (is-eq current-id u1)
+      none
+      (map-get? snapshots { snapshot-id: (- current-id u1) })
+    )
   )
 )
