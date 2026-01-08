@@ -583,3 +583,16 @@
     )
   )
 )
+
+(define-public (leave-dao)
+  (let
+    (
+      (member-info (unwrap! (map-get? member-addresses { address: tx-sender }) ERR_NOT_MEMBER))
+      (member-id (get member-id member-info))
+    )
+    (map-delete members { member-id: member-id })
+    (map-delete member-addresses { address: tx-sender })
+    (map-delete delegations { delegator: tx-sender })
+    (ok true)
+  )
+)
