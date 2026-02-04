@@ -400,6 +400,27 @@
   )
 )
 
+(define-read-only (simulate-voting-power-in (member-address principal) (blocks-ahead uint))
+  (match (get-member-by-address member-address)
+    member-data
+    (let
+      (
+        (target-height (+ stacks-block-height blocks-ahead))
+        (last-activity (get last-activity member-data))
+        (blocks-since-activity (if (>= target-height last-activity) (- target-height last-activity) u0))
+        (decay-periods (/ blocks-since-activity DECAY_PERIOD))
+        (base-power (get voting-power member-data))
+        (activity-bonus (+ (* (get total-proposals member-data) u100) (* (get total-votes member-data) u50)))
+      )
+      (if (> decay-periods u10)
+        u0
+        (+ (- base-power (* decay-periods u100)) activity-bonus)
+      )
+    )
+    u0
+  )
+)
+
 (define-read-only (get-total-active-voting-power)
   (let
     (
